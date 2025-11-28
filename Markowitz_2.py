@@ -41,17 +41,16 @@ df = Bdf.loc["2019-01-01":"2024-04-01"]
 
 """
 Strategy Creation
-
-Create your own strategy, you can add parameter but please remain "price" and "exclude" unchanged
 """
-
 
 class MyPortfolio:
     """
-    NOTE: You can modify the initialization function
+    Strategy: Global Minimum Variance (GMV)
+    Rationale: Mathematically minimizes portfolio volatility using Quadratic Programming (Gurobi).
+               Lower volatility (denominator) directly boosts the Sharpe Ratio.
     """
 
-    def __init__(self, price, exclude, lookback=50, gamma=0):
+    def __init__(self, price, exclude, lookback=252, top_n=None, gamma=0):
         self.price = price
         self.returns = price.pct_change().fillna(0)
         self.exclude = exclude
@@ -59,10 +58,13 @@ class MyPortfolio:
         self.gamma = gamma
 
     def calculate_weights(self):
-        # Get the assets by excluding the specified column
+        # 1. 取得資產列表 (排除 SPY)
         assets = self.price.columns[self.price.columns != self.exclude]
+        
+        # 2. 定義資產數量 (關鍵修正: 確保變數存在)
+        n_assets = len(assets)
 
-        # Calculate the portfolio weights
+        # 初始化權重 DataFrame
         self.portfolio_weights = pd.DataFrame(
             index=self.price.index, columns=self.price.columns
         )
@@ -70,8 +72,50 @@ class MyPortfolio:
         """
         TODO: Complete Task 4 Below
         """
-        
-        
+        # 滾動計算
+        for i in range(self.lookback + 1, len(self.price)):
+            current_date = self.price.index[i]
+
+            # 取得回溯期內的回報數據
+            R_n = self.returns[assets].iloc[i - self.lookback : i]
+            
+            # 計算協方差矩陣 (Covariance Matrix)
+            Sigma = R_n.cov().values
+            
+            # 使用 Gurobi 求解最小變異數組合
+            # 目標: Minimize (w' * Sigma * w) -> 最小化風險
+            try:
+                with gp.Env(empty=True) as env:
+                    env.setParam("OutputFlag", 0)  # 關閉輸出
+                    env.setParam("DualReductions", 0)
+                    env.start()
+                    
+                    with gp.Model(env=env, name="min_variance") as model:
+                        # 定義變數 (權重 w >= 0)
+                        w = model.addMVar(n_assets, name="w", lb=0.0)
+                        
+                        # 設定目標函數: 最小化變異數
+                        model.setObjective(w @ Sigma @ w, gp.GRB.MINIMIZE)
+                        
+                        # 設定約束: 權重總和為 1
+                        model.addConstr(w.sum() == 1, name="budget")
+                        
+                        # 優化
+                        model.optimize()
+                        
+                        if model.status == gp.GRB.OPTIMAL:
+                            optimal_weights = w.X
+                        else:
+                            # 優化失敗時的備案：等權重
+                            optimal_weights = np.ones(n_assets) / n_assets
+
+                    # 寫入權重
+                    self.portfolio_weights.loc[current_date, assets] = optimal_weights
+            
+            except Exception:
+                # 發生任何錯誤時的備案：等權重
+                self.portfolio_weights.loc[current_date, assets] = 1.0 / n_assets
+
         """
         TODO: Complete Task 4 Above
         """
@@ -80,64 +124,9 @@ class MyPortfolio:
         self.portfolio_weights.fillna(0, inplace=True)
 
     def calculate_portfolio_returns(self):
-        # Ensure weights are calculated
         if not hasattr(self, "portfolio_weights"):
             self.calculate_weights()
 
-        # Calculate the portfolio returns
         self.portfolio_returns = self.returns.copy()
         assets = self.price.columns[self.price.columns != self.exclude]
-        self.portfolio_returns["Portfolio"] = (
-            self.portfolio_returns[assets]
-            .mul(self.portfolio_weights[assets])
-            .sum(axis=1)
-        )
-
-    def get_results(self):
-        # Ensure portfolio returns are calculated
-        if not hasattr(self, "portfolio_returns"):
-            self.calculate_portfolio_returns()
-
-        return self.portfolio_weights, self.portfolio_returns
-
-
-if __name__ == "__main__":
-    # Import grading system (protected file in GitHub Classroom)
-    from grader_2 import AssignmentJudge
-    
-    parser = argparse.ArgumentParser(
-        description="Introduction to Fintech Assignment 3 Part 12"
-    )
-
-    parser.add_argument(
-        "--score",
-        action="append",
-        help="Score for assignment",
-    )
-
-    parser.add_argument(
-        "--allocation",
-        action="append",
-        help="Allocation for asset",
-    )
-
-    parser.add_argument(
-        "--performance",
-        action="append",
-        help="Performance for portfolio",
-    )
-
-    parser.add_argument(
-        "--report", action="append", help="Report for evaluation metric"
-    )
-
-    parser.add_argument(
-        "--cumulative", action="append", help="Cumulative product result"
-    )
-
-    args = parser.parse_args()
-
-    judge = AssignmentJudge()
-    
-    # All grading logic is protected in grader_2.py
-    judge.run_grading(args)
+        self.portfolio_
